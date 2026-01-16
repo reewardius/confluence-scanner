@@ -956,19 +956,33 @@ def count_affected_from_csv(csv_file):
         return None, None
 
 def send_email_with_attachment(subject, body_text, sender, recipient, aws_region, attachment_path):
-    """Send email via AWS SES with XLSX attachment"""
+    """Send email via AWS SES with XLSX attachment
+    
+    Args:
+        recipient: String with single email or comma-separated emails (e.g., "user1@example.com,user2@example.com")
+    """
     if not boto3:
         logging.error("boto3 not installed. Install with: pip install boto3")
         return False
     
     try:
+        # Parse recipients - support both single email and comma-separated list
+        if isinstance(recipient, str):
+            recipients = [email.strip() for email in recipient.split(',') if email.strip()]
+        else:
+            recipients = [recipient]
+        
+        if not recipients:
+            logging.error("No valid recipients specified")
+            return False
+        
         # Create SES client
         ses_client = boto3.client("ses", region_name=aws_region)
         
         # Create email message
         msg = MIMEMultipart()
         msg["From"] = sender
-        msg["To"] = recipient
+        msg["To"] = ", ".join(recipients)  # Join all recipients for the header
         msg["Subject"] = subject
         
         # Attach body
@@ -986,14 +1000,15 @@ def send_email_with_attachment(subject, body_text, sender, recipient, aws_region
                 msg.attach(attachment)
             logging.info(f"Attached file: {attachment_path}")
         
-        # Send email
+        # Send email to all recipients
         response = ses_client.send_raw_email(
             Source=sender,
-            Destinations=[recipient],
+            Destinations=recipients,  # AWS SES expects a list
             RawMessage={"Data": msg.as_string()}
         )
         
-        logging.info(f"✅ Email sent successfully! MessageId: {response['MessageId']}")
+        logging.info(f"✅ Email sent successfully to {len(recipients)} recipient(s): {', '.join(recipients)}")
+        logging.info(f"   MessageId: {response['MessageId']}")
         return True
         
     except Exception as e:
@@ -1485,6 +1500,11 @@ Examples:
   python3 confluence_improved_v5.py --base-url https://your-org.atlassian.net \\
     --username user@example.com --token YOUR_TOKEN --regex-file regex.txt \\
     --email-sender security@company.com --alert --security-contact appsec@company.com
+    
+  # Send results to multiple recipients
+  python3 confluence_improved_v5.py --base-url https://your-org.atlassian.net \\
+    --username user@example.com --token YOUR_TOKEN --regex-file regex.txt \\
+    --email-sender security@company.com --email-recipient "appsec@company.com,team@company.com"
         """
     )
     parser.add_argument("--base-url", help="Base Confluence URL")
@@ -1514,7 +1534,7 @@ Examples:
     
     # Email notification arguments
     parser.add_argument("--email-sender", help="Sender email address for notifications (must be verified in AWS SES)")
-    parser.add_argument("--email-recipient", help="Recipient email address for scan results")
+    parser.add_argument("--email-recipient", help="Recipient email address(es) for scan results (single email or comma-separated list, e.g., 'user1@example.com,user2@example.com')")
     parser.add_argument("--aws-region", default="eu-central-1", help="AWS region for SES (default: eu-central-1)")
     
     # Author alert arguments
