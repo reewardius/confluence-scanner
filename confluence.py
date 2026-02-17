@@ -144,8 +144,12 @@ def get_public_spaces(base_url, headers):
             break
     return all_spaces
 
-def get_pages_in_space(base_url, auth, headers, space_key, modified_after=None, modified_before=None, created_in_year=None):
-    """Retrieve pages in a space, applying date filters."""
+def get_pages_in_space(base_url, auth, headers, space_key, modified_after=None, modified_before=None, created_in_years=None):
+    """Retrieve pages in a space, applying date filters.
+    
+    Args:
+        created_in_years: None, single year (int), or list of years ([int])
+    """
     all_pages, start, limit = [], 0, 50
     while True:
         url = f"{base_url}/rest/api/content"
@@ -154,7 +158,7 @@ def get_pages_in_space(base_url, auth, headers, space_key, modified_after=None, 
         if not data:
             break
         pages = data.get("results", [])
-        filtered_pages = [p for p in pages if filter_page(p, modified_after, modified_before, created_in_year)]
+        filtered_pages = [p for p in pages if filter_page(p, modified_after, modified_before, created_in_years)]
         for page in filtered_pages:
             page_id = page.get("id")
             full_data = safe_request(
@@ -170,8 +174,12 @@ def get_pages_in_space(base_url, auth, headers, space_key, modified_after=None, 
             break
     return all_pages
 
-def filter_page(page, modified_after, modified_before, created_in_year):
-    """Filter pages based on modification and creation dates."""
+def filter_page(page, modified_after, modified_before, created_in_years):
+    """Filter pages based on modification and creation dates.
+    
+    Args:
+        created_in_years: None, single year (int), or list of years ([int])
+    """
     created_date_str = page.get("history", {}).get("createdDate")
     modified_date_str = page.get("version", {}).get("when")
     
@@ -182,8 +190,13 @@ def filter_page(page, modified_after, modified_before, created_in_year):
         return False
     if modified_before and modified_date and modified_date > modified_before:
         return False
-    if created_in_year and created_date and created_date.year != created_in_year:
-        return False
+    if created_in_years and created_date:
+        # Support both single year and list of years
+        if isinstance(created_in_years, list):
+            if created_date.year not in created_in_years:
+                return False
+        elif created_date.year != created_in_years:
+            return False
     return True
 
 def parse_iso_date(date_str):
@@ -209,25 +222,40 @@ def get_last_editor_email(base_url, auth, headers, page_id):
         logging.error(f"Error fetching editor email for page {page_id}: {e}")
         return "?"
 
-def get_attachments(base_url, auth, headers, page_id, max_age_delta=None):
-    """Retrieve attachments for a given page."""
+def get_attachments(base_url, auth, headers, page_id, created_in_years=None):
+    """Retrieve attachments for a given page.
+    
+    Args:
+        created_in_years: None, single year (int), or list of years ([int])
+    """
     try:
         url = f"{base_url}/rest/api/content/{page_id}/child/attachment"
-        data = safe_request(url, headers, auth, params={"expand": "version"})
+        data = safe_request(url, headers, auth, params={"expand": "version,history"})
         if not data:
             return []
         
         attachments = data.get("results", [])
-        if max_age_delta:
-            cutoff = datetime.now() - max_age_delta
-            filtered = []
-            for att in attachments:
-                when_str = att.get("version", {}).get("when", "")
-                when_date = parse_iso_date(when_str)
-                if when_date and when_date >= cutoff:
+        
+        # If no filter, return all
+        if not created_in_years:
+            return attachments
+        
+        filtered = []
+        for att in attachments:
+            # Filter by created_in_years (creation date)
+            created_str = att.get("history", {}).get("createdDate") or att.get("version", {}).get("when", "")
+            created_date = parse_iso_date(created_str)
+            
+            if created_date:
+                # Support both single year and list of years
+                if isinstance(created_in_years, list):
+                    if created_date.year in created_in_years:
+                        filtered.append(att)
+                elif created_date.year == created_in_years:
                     filtered.append(att)
-            return filtered
-        return attachments
+        
+        return filtered
+        
     except Exception as e:
         logging.error(f"Error fetching attachments for page {page_id}: {e}")
         return []
@@ -436,7 +464,9 @@ def validate_arguments(args):
     if not args.keywords and not args.regex_file and not args.regex:
         errors.append("At least one of --keywords, --regex, or --regex-file is required")
     
-    if args.include_attachments:
+    # Validate mode parameter
+    mode = getattr(args, 'mode', None)
+    if mode in ['files', 'both']:
         if args.filetype and args.exclude_filetype:
             errors.append("Cannot use both --filetype and --exclude-filetype")
     
@@ -1015,6 +1045,71 @@ def send_email_with_attachment(subject, body_text, sender, recipient, aws_region
         logging.error(f"❌ Error sending email: {e}")
         return False
 
+def send_email_with_multiple_attachments(subject, body_text, sender, recipient, aws_region, attachment_paths):
+    """Send email via AWS SES with multiple XLSX attachments
+    
+    Args:
+        recipient: String with single email or comma-separated emails
+        attachment_paths: List of file paths to attach
+    """
+    if not boto3:
+        logging.error("boto3 not installed. Install with: pip install boto3")
+        return False
+    
+    try:
+        # Parse recipients - support both single email and comma-separated list
+        if isinstance(recipient, str):
+            recipients = [email.strip() for email in recipient.split(',') if email.strip()]
+        else:
+            recipients = [recipient]
+        
+        if not recipients:
+            logging.error("No valid recipients specified")
+            return False
+        
+        # Create SES client
+        ses_client = boto3.client("ses", region_name=aws_region)
+        
+        # Create email message
+        msg = MIMEMultipart()
+        msg["From"] = sender
+        msg["To"] = ", ".join(recipients)
+        msg["Subject"] = subject
+        
+        # Attach body
+        msg.attach(MIMEText(body_text, "plain", "utf-8"))
+        
+        # Attach multiple XLSX files
+        for attachment_path in attachment_paths:
+            if os.path.exists(attachment_path):
+                with open(attachment_path, "rb") as f:
+                    attachment = MIMEApplication(f.read(), _subtype="xlsx")
+                    attachment.add_header(
+                        "Content-Disposition", 
+                        "attachment", 
+                        filename=os.path.basename(attachment_path)
+                    )
+                    msg.attach(attachment)
+                logging.info(f"Attached file: {attachment_path}")
+            else:
+                logging.warning(f"Attachment not found: {attachment_path}")
+        
+        # Send email to all recipients
+        response = ses_client.send_raw_email(
+            Source=sender,
+            Destinations=recipients,
+            RawMessage={"Data": msg.as_string()}
+        )
+        
+        logging.info(f"✅ Email sent successfully to {len(recipients)} recipient(s): {', '.join(recipients)}")
+        logging.info(f"   MessageId: {response['MessageId']}")
+        logging.info(f"   Attachments: {len(attachment_paths)} file(s)")
+        return True
+        
+    except Exception as e:
+        logging.error(f"❌ Error sending email: {e}")
+        return False
+
 def validate_csv_fields(space_name, title, page_url, keyword, finding_type, formatted_value, email):
     """
     Validate and sanitize all fields before writing to CSV.
@@ -1065,12 +1160,12 @@ def validate_attachment_fields(space_name, page_title, file_title, ext, file_url
     return (safe_space_name, safe_page_title, safe_file_title, safe_ext, safe_file_url,
             safe_page_url, safe_keyword, safe_finding_type, safe_formatted_value, safe_email)
 
-def process_space(base_url, auth, headers, space, keywords, patterns, writer, csvfile, include_attachments, allowed_types, excluded_types, max_size_bytes, mod_after, mod_before, created_year, no_duplicates, max_age_delta, secret_max_length, scan_images_only, archive_support, findings_set, debug_limit=None, current_total=0):
+def process_space(base_url, auth, headers, space, keywords, patterns, writer, csvfile, include_attachments, allowed_types, excluded_types, max_size_bytes, mod_after, mod_before, created_years, no_duplicates, secret_max_length, scan_images_only, archive_support, findings_set, debug_limit=None, current_total=0):
     """Process a single Confluence space."""
     space_key = space.get("key", "?")
     space_name = space.get("name", space_key).strip()
     logging.info(f"Processing space: {space_key} - {space_name}")
-    pages = get_pages_in_space(base_url, auth, headers, space_key, mod_after, mod_before, created_year)
+    pages = get_pages_in_space(base_url, auth, headers, space_key, mod_after, mod_before, created_years)
     
     total_files_in_space = 0
     total_secrets_in_space = 0
@@ -1078,8 +1173,8 @@ def process_space(base_url, auth, headers, space, keywords, patterns, writer, cs
     
     # Don't reopen file - use existing writer
     for page in pages:
-        secrets_found, files_scanned = process_page(base_url, auth, headers, page, space_name, space_key, writer, csvfile, keywords, patterns, include_attachments, allowed_types, excluded_types, max_size_bytes, no_duplicates, max_age_delta, secret_max_length,
-            scan_images_only, archive_support, findings_set
+        secrets_found, files_scanned = process_page(base_url, auth, headers, page, space_name, space_key, writer, csvfile, keywords, patterns, include_attachments, allowed_types, excluded_types, max_size_bytes, no_duplicates, secret_max_length,
+            scan_images_only, archive_support, findings_set, created_years
         )
         total_secrets_in_space += secrets_found
         total_files_in_space += files_scanned
@@ -1096,7 +1191,7 @@ def process_space(base_url, auth, headers, space, keywords, patterns, writer, cs
     
     return total_secrets_in_space, total_files_in_space, total_pages_in_space
 
-def process_page(base_url, auth, headers, page, space_name, space_key, writer, csvfile, keywords, patterns, include_attachments, allowed_types, excluded_types, max_size_bytes, no_duplicates, max_age_delta, secret_max_length, scan_images_only, archive_support, findings_set):
+def process_page(base_url, auth, headers, page, space_name, space_key, writer, csvfile, keywords, patterns, include_attachments, allowed_types, excluded_types, max_size_bytes, no_duplicates, secret_max_length, scan_images_only, archive_support, findings_set, created_years=None):
     """Process a single Confluence page."""
     title = page.get("title", "?")
     page_id = page.get("id", "?")
@@ -1105,7 +1200,7 @@ def process_page(base_url, auth, headers, page, space_name, space_key, writer, c
     secrets_found = 0
     
     if include_attachments:
-        attachments = get_attachments(base_url, auth, headers, page_id, max_age_delta)
+        attachments = get_attachments(base_url, auth, headers, page_id, created_years)
         total_files_in_page = len(attachments)
         filtered_attachments = [
             att for att in attachments
@@ -1168,21 +1263,160 @@ def process_page(base_url, auth, headers, page, space_name, space_key, writer, c
     return secrets_found, total_files_in_page
 
 def main(base_url, username, token, keywords_file, regex_file, single_regex, output_file, 
-         include_attachments, filetypes, exclude_filetypes, max_size, public_only,
+         filetypes, exclude_filetypes, max_size, public_only,
          space_keys, exclude_space_keys, modified_after, modified_before, created_in_year,
-         no_duplicates, resume_from, max_attachment_age, scan_images_only, archive_support, 
+         no_duplicates, resume_from, scan_images_only, archive_support, 
          config, email_sender, email_recipient, aws_region, secret_max_length, debug_mode,
-         alert, security_contact, security_wiki):
+         alert, security_contact, security_wiki, mode=None, _recursive=False):
     """Main function to scan Confluence for keywords and secrets."""
     start_time = time.time()
-    setup_logging()
+    
+    # Only setup logging on first (non-recursive) call
+    if not _recursive:
+        setup_logging()
+    
+    # Handle mode parameter
+    # If mode is None, scan only pages (default behavior)
+    # If mode is 'both', run scan twice: once for pages, once for files
+    if mode == "both":
+        logging.info("=" * 80)
+        logging.info("RUNNING IN BOTH MODE - Will scan pages and files separately")
+        logging.info("=" * 80)
+        
+        # Generate separate output files for each phase
+        base_output = output_file.replace('.csv', '')
+        pages_csv = f"{base_output}_pages.csv"
+        files_csv = f"{base_output}_files.csv"
+        
+        # Scan pages first (without sending email)
+        logging.info("\n" + "=" * 80)
+        logging.info("PHASE 1: SCANNING PAGES")
+        logging.info("=" * 80)
+        main(base_url, username, token, keywords_file, regex_file, single_regex, pages_csv,
+             filetypes, exclude_filetypes, max_size, public_only,
+             space_keys, exclude_space_keys, modified_after, modified_before, created_in_year,
+             no_duplicates, resume_from, scan_images_only, archive_support,
+             config, None, None, aws_region, secret_max_length, debug_mode,  # email_sender=None, email_recipient=None
+             alert, security_contact, security_wiki, mode=None, _recursive=True)  # Recursive call
+        
+        # Scan files second (without sending email)
+        logging.info("\n" + "=" * 80)
+        logging.info("PHASE 2: SCANNING FILES")
+        logging.info("=" * 80)
+        main(base_url, username, token, keywords_file, regex_file, single_regex, files_csv,
+             filetypes, exclude_filetypes, max_size, public_only,
+             space_keys, exclude_space_keys, modified_after, modified_before, created_in_year,
+             no_duplicates, resume_from, scan_images_only, archive_support,
+             config, None, None, aws_region, secret_max_length, debug_mode,  # email_sender=None, email_recipient=None
+             alert, security_contact, security_wiki, mode="files", _recursive=True)  # Recursive call
+        
+        logging.info("\n" + "=" * 80)
+        logging.info("BOTH MODE COMPLETED - Check confluence_secrets.xlsx and confluence_secrets_in_files.xlsx")
+        logging.info("=" * 80)
+        
+        # Now send ONE email with BOTH attachments if email is configured
+        if email_sender and email_recipient:
+            if not aws_region:
+                aws_region = "eu-central-1"
+            
+            logging.info("Preparing to send combined email report with both attachments...")
+            
+            # Check which files exist
+            xlsx_pages = "confluence_secrets.xlsx"
+            xlsx_files = "confluence_secrets_in_files.xlsx"
+            
+            pages_exist = os.path.exists(xlsx_pages)
+            files_exist = os.path.exists(xlsx_files)
+            
+            if not pages_exist and not files_exist:
+                logging.warning("No XLSX reports found to attach")
+                return
+            
+            # Count secrets from BOTH CSV files
+            total_secrets_pages = 0
+            total_secrets_files = 0
+            
+            # Count from pages CSV
+            if os.path.exists(pages_csv):
+                try:
+                    with open(pages_csv, 'r', encoding='utf-8') as f:
+                        reader = csv.reader(f)
+                        header = next(reader, None)
+                        for row in reader:
+                            if row and "DUMMY_ROW_DELETE_ME" not in str(row):
+                                total_secrets_pages += 1
+                except Exception as e:
+                    logging.warning(f"Could not count secrets from pages CSV: {e}")
+            
+            # Count from files CSV
+            if os.path.exists(files_csv):
+                try:
+                    with open(files_csv, 'r', encoding='utf-8') as f:
+                        reader = csv.reader(f)
+                        header = next(reader, None)
+                        for row in reader:
+                            if row and "DUMMY_ROW_DELETE_ME" not in str(row):
+                                total_secrets_files += 1
+                except Exception as e:
+                    logging.warning(f"Could not count secrets from files CSV: {e}")
+            
+            total_secrets_combined = total_secrets_pages + total_secrets_files
+            
+            # Generate subject
+            if total_secrets_combined > 0:
+                subject = f"CRITICAL: Confluence Secrets Scanner (Pages & Files) - {total_secrets_combined} Secrets Found"
+            else:
+                subject = "Confluence Secrets Scanner (Pages & Files) - No Secrets Found"
+            
+            # Generate email body
+            email_body = f"""This report covered page content and file attachments.
+
+Total Secrets Found: {total_secrets_combined}
+- Pages: {total_secrets_pages}
+- Files: {total_secrets_files}
+
+Two separate reports are attached:
+1. confluence_secrets.xlsx - Secrets found in page content
+2. confluence_secrets_in_files.xlsx - Secrets found in file attachments
+
+Please review both reports and take appropriate action.
+"""
+            
+            # Prepare attachments list
+            attachments = []
+            if pages_exist:
+                attachments.append(xlsx_pages)
+            if files_exist:
+                attachments.append(xlsx_files)
+            
+            # Send email with multiple attachments
+            send_email_with_multiple_attachments(
+                subject=subject,
+                body_text=email_body,
+                sender=email_sender,
+                recipient=email_recipient,
+                aws_region=aws_region,
+                attachment_paths=attachments
+            )
+        else:
+            logging.info("Email notification disabled (no sender/recipient configured)")
+        
+        return
+    
+    # Set include_attachments based on mode
+    if mode == "files":
+        include_attachments = True
+        logging.info("Running in FILES mode - scanning only attachments")
+    else:  # mode is None (default - pages only)
+        include_attachments = False
+        logging.info("Running in PAGES mode - scanning only page content")
     
     # Load config file and override unset arguments
     config_dict = load_config(config)
     
     # Check dependencies
     dep_errors = check_dependencies()
-    if dep_errors and (include_attachments or scan_images_only or archive_support):
+    if dep_errors and (mode == "files" or scan_images_only or archive_support):
         for error in dep_errors:
             logging.error(error)
         exit(1)
@@ -1221,8 +1455,16 @@ def main(base_url, username, token, keywords_file, regex_file, single_regex, out
     except ValueError as e:
         logging.error(e)
         mod_before = None
-    created_year = int(created_in_year) if created_in_year else None
-    max_age_delta = parse_age(max_attachment_age) if max_attachment_age else None
+    
+    # Parse created_in_year - support single year or comma-separated list
+    created_years = None
+    if created_in_year:
+        try:
+            years_str = [y.strip() for y in created_in_year.split(',')]
+            created_years = [int(y) for y in years_str if y]
+        except ValueError:
+            logging.error(f"Invalid year format in --created-in-year: {created_in_year}")
+            created_years = None
 
     if not keywords and not patterns:
         logging.error("No search criteria provided. Specify --keywords, --regex, or --regex-file")
@@ -1289,7 +1531,7 @@ def main(base_url, username, token, keywords_file, regex_file, single_regex, out
             secrets_in_space, files_in_space, pages_in_space = process_space(
                 base_url, auth, headers, space, keywords, patterns, writer, csvfile,
                 include_attachments, allowed_types, excluded_types, max_size_bytes, 
-                mod_after, mod_before, created_year, no_duplicates, max_age_delta, 
+                mod_after, mod_before, created_years, no_duplicates, 
                 secret_max_length, scan_images_only, archive_support, findings_set, 
                 debug_limit, total_secrets
             )
@@ -1354,11 +1596,19 @@ def main(base_url, username, token, keywords_file, regex_file, single_regex, out
             affected_pages=affected_pages_count
         )
         
-        # Prepare subject
-        if total_secrets > 0:
-            subject = f"CRITICAL: Confluence Secrets Scanner - {total_secrets} Secrets Found"
+        # Prepare subject with scan mode indicator
+        mode_label = ""
+        if mode == "files":
+            mode_label = " (Files)"
+        elif mode == "pages":
+            mode_label = " (Pages)"
         else:
-            subject = "Confluence Secrets Scanner - No Secrets Found"
+            mode_label = " (General)"
+        
+        if total_secrets > 0:
+            subject = f"CRITICAL: Confluence Secrets Scanner{mode_label} - {total_secrets} Secrets Found"
+        else:
+            subject = f"Confluence Secrets Scanner{mode_label} - No Secrets Found"
         
         # Send email with attachment
         attachment = xlsx_file if xlsx_created and os.path.exists(xlsx_file) else None
@@ -1483,14 +1733,19 @@ if __name__ == "__main__":
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic scan with regex file
+  # Basic scan (pages only, default)
   python3 confluence_improved_v5.py --base-url https://your-org.atlassian.net \\
     --username user@example.com --token YOUR_TOKEN --regex-file regex.txt
 
-  # Scan with attachments
+  # Scan only files/attachments
   python3 confluence_improved_v5.py --base-url https://your-org.atlassian.net \\
     --username user@example.com --token YOUR_TOKEN --regex-file regex.txt \\
-    --include-attachments --filetype docx,pdf,json
+    -m files --filetype docx,pdf,json
+
+  # Scan both pages and files separately (creates 2 reports)
+  python3 confluence_improved_v5.py --base-url https://your-org.atlassian.net \\
+    --username user@example.com --token YOUR_TOKEN --regex-file regex.txt \\
+    -m both --filetype docx,pdf,json
 
   # Public-only scan
   python3 confluence_improved_v5.py --base-url https://your-org.atlassian.net \\
@@ -1514,18 +1769,18 @@ Examples:
     parser.add_argument("--keywords", help="File with keywords (one per line)")
     parser.add_argument("--regex-file", help="Regex file with patterns in 'Name:::Regex:::GroupIndex' format")
     parser.add_argument("--regex", help="Single regex pattern (legacy)")
-    parser.add_argument("--include-attachments", action="store_true", help="Scan attachment files")
-    parser.add_argument("--filetype", help="Comma-separated file types to scan (only with --include-attachments), e.g., docx,pdf,json")
-    parser.add_argument("--exclude-filetype", help="Comma-separated file types to exclude (only with --include-attachments), e.g., pdf")
-    parser.add_argument("--max-size", help="Max file size to analyze (only with --include-attachments), e.g., 2mb, 500kb")
+    parser.add_argument("-m", "--mode", choices=["files", "both"], 
+                       help="Scan mode: 'files' (only attachments), 'both' (pages and files separately, creates 2 reports). Default: scan pages only")
+    parser.add_argument("--filetype", help="Comma-separated file types to scan (only with --mode files or both), e.g., docx,pdf,json")
+    parser.add_argument("--exclude-filetype", help="Comma-separated file types to exclude (only with --mode files or both), e.g., pdf")
+    parser.add_argument("--max-size", help="Max file size to analyze (only with --mode files or both), e.g., 2mb, 500kb")
     parser.add_argument("--space-keys", help="Space keys to scan (comma-separated or file path)")
     parser.add_argument("--exclude-space-keys", help="Space keys to exclude (comma-separated or file path)")
     parser.add_argument("--modified-after", help="Scan pages modified after this date (D.M.Y or D/M/Y)")
     parser.add_argument("--modified-before", help="Scan pages modified before this date (D.M.Y or D/M/Y)")
-    parser.add_argument("--created-in-year", help="Scan pages created in this year (e.g., 2025)")
+    parser.add_argument("--created-in-year", help="Scan pages and files created in this year or years (e.g., 2025 or 2025,2026)")
     parser.add_argument("--no-duplicates", action="store_true", help="Exclude duplicate findings")
     parser.add_argument("--resume-from", help="Resume scanning from this space key")
-    parser.add_argument("--max-attachment-age", help="Scan only recent attachments, e.g., 1d, 1w, 1m, 1y")
     parser.add_argument("--scan-images-only", action="store_true", help="Scan only images with OCR")
     parser.add_argument("--archive-support", action="store_true", help="Unpack and scan archives (zip, tar, etc.)")
     parser.add_argument("--secret-max-length", type=int, default=20, help="Maximum characters to display in 'Matched Value' column (default: 20)")
@@ -1564,7 +1819,6 @@ Examples:
         regex_file=args.regex_file,
         single_regex=args.regex,
         output_file=args.output,
-        include_attachments=args.include_attachments,
         filetypes=args.filetype,
         exclude_filetypes=args.exclude_filetype,
         max_size=args.max_size,
@@ -1576,7 +1830,6 @@ Examples:
         created_in_year=args.created_in_year,
         no_duplicates=args.no_duplicates,
         resume_from=args.resume_from,
-        max_attachment_age=args.max_attachment_age,
         scan_images_only=args.scan_images_only,
         archive_support=args.archive_support,
         config=args.config,
@@ -1587,5 +1840,6 @@ Examples:
         debug_mode=args.debug,
         alert=args.alert,
         security_contact=args.security_contact,
-        security_wiki=args.security_wiki
+        security_wiki=args.security_wiki,
+        mode=getattr(args, 'mode', None)
     )

@@ -1,0 +1,8 @@
+requests
+Pillow
+pytesseract
+psutil
+python-docx
+PyMuPDF
+openpyxl
+boto3
