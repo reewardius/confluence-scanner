@@ -3,7 +3,7 @@
 ```
 docker build -t confluence-scanner .
 ```
-#### Run with auth
+#### Run authorization scan
 ```
 docker run --rm \
   -v $(pwd)/output:/output \
@@ -15,7 +15,7 @@ docker run --rm \
   --regex-file /app/regex.txt \
   -m both
 ```
-#### Run without auth
+#### Run anonymous scan
 ```
 docker run --rm \
   -v $(pwd)/output:/output \
