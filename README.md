@@ -13,7 +13,8 @@ docker run --rm \
   --token TOKEN \
   --username user@company.com \
   --regex-file /app/regex.txt \
-  -m both
+  -m both \
+  --output /output/confluence_results.csv
 ```
 #### Run anonymous scan
 ```
@@ -24,7 +25,8 @@ docker run --rm \
   --base-url https://company.atlassian.net/ \
   --regex-file /app/regex.txt \
   --public-only \
-  -m both
+  -m both \
+  --output /output/confluence_results.csv
 ```
 #### Output
 ```
