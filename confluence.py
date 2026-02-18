@@ -1321,9 +1321,10 @@ def main(base_url, username, token, keywords_file, regex_file, single_regex, out
             
             logging.info("Preparing to send combined email report with both attachments...")
             
-            # Check which files exist
-            xlsx_pages = "confluence_secrets.xlsx"
-            xlsx_files = "confluence_secrets_in_files.xlsx"
+            # Check which files exist (same directory as output_file)
+            output_dir = os.path.dirname(os.path.abspath(output_file))
+            xlsx_pages = os.path.join(output_dir, "confluence_secrets.xlsx")
+            xlsx_files = os.path.join(output_dir, "confluence_secrets_in_files.xlsx")
             
             pages_exist = os.path.exists(xlsx_pages)
             files_exist = os.path.exists(xlsx_files)
@@ -1561,11 +1562,12 @@ Please review both reports and take appropriate action.
     
     logging.info(f"Results saved in: {output_file}")
     
-    # Create XLSX report with appropriate name
+    # Create XLSX report with appropriate name (same directory as output_file)
+    output_dir = os.path.dirname(os.path.abspath(output_file))
     if include_attachments:
-        xlsx_file = "confluence_secrets_in_files.xlsx"
+        xlsx_file = os.path.join(output_dir, "confluence_secrets_in_files.xlsx")
     else:
-        xlsx_file = "confluence_secrets.xlsx"
+        xlsx_file = os.path.join(output_dir, "confluence_secrets.xlsx")
     
     xlsx_created = False
     if create_xlsx_report(output_file, xlsx_file):
