@@ -222,9 +222,26 @@ The scanner can send results by email using AWS SES.
 }
 ```
 
-**When running on EC2** — assign an IAM Role with SES permissions to the instance. The scanner will automatically pick up credentials from the instance metadata without any extra configuration.
+**When running on EC2 — assign an IAM Role with SES permissions to the instance:**
 
-**When running locally or in Docker** — pass credentials via environment variables:
+- Local run (`python3 confluence.py ...`) — no extra configuration needed, credentials are picked up automatically
+
+- Docker run — add `--network host` so the container can reach the instance credentials:
+
+```bash
+docker run --rm \
+  --network host \
+  -v $(pwd)/output:/output \
+  -v $(pwd)/regex.txt:/app/regex.txt:ro \
+  confluence-scanner \
+  --base-url https://your-org.atlassian.net \
+  --username user@example.com \
+  --token YOUR_API_TOKEN \
+  --regex-file /app/regex.txt \
+  --output /output/results.csv
+```
+
+You can also pass credentials via environment variables:
 ```bash
 docker run --rm \
   -e AWS_ACCESS_KEY_ID=YOUR_KEY \
@@ -262,4 +279,4 @@ python3 confluence.py --config config.json
 
 ## Security Notice
 
-> ⚠️ This tool is intended for use by authorized security personnel only. Always ensure you have permission to scan the target Confluence instance before running. Do not commit API tokens or credentials to version control.
+> ⚠️ This tool is intended for use by authorized security personnel only. Always ensure you have permission to scan the target Confluence instance before running.
