@@ -89,6 +89,7 @@ docker run --rm \
   --base-url https://your-org.atlassian.net \
   --public-only \
   --regex-file /app/regex.txt \
+  --m both \
   --output /output/results.csv
 ```
 
@@ -158,6 +159,9 @@ Results are saved to the directory specified in `--output`.
 | `--regex-file` | Path to regex patterns file (`Name:::Regex:::GroupIndex`) |
 | `--regex` | Single regex pattern (legacy, simple use) |
 | `--keywords` | Path to keywords file (one keyword per line) |
+| `--trufflehog-patterns`, `-tp` | Path to a TruffleHog YAML file with detectors |
+| `--trufflehog-keywords`, `-tk` | Include only TruffleHog detectors whose keywords field matches any of the specified values. **Example:** `aws,api,internal` |
+| `--trufflehog-exclude-keywords`, `-tek` | Exclude TruffleHog detectors whose keywords field matches any of the specified values. **Example:** `gateway,arn` |
 
 ### Scan mode
 
