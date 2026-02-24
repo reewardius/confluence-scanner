@@ -6,3 +6,4 @@ python-docx
 PyMuPDF
 openpyxl
 boto3
+pyyaml
