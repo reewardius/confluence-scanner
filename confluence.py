@@ -20,6 +20,12 @@ from email.mime.application import MIMEApplication
 from email.mime.base import MIMEBase
 from email import encoders
 
+# Try to import YAML for TruffleHog format support
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
 try:
     import boto3
 except ImportError:
@@ -144,7 +150,7 @@ def get_public_spaces(base_url, headers):
             break
     return all_spaces
 
-def get_pages_in_space(base_url, auth, headers, space_key, modified_after=None, modified_before=None, created_in_years=None):
+def get_pages_in_space(base_url, auth, headers, space_key, modified_after=None, modified_before=None, created_in_years=None, modified_in_years=None):
     """Retrieve pages in a space, applying date filters.
     
     Args:
@@ -158,7 +164,7 @@ def get_pages_in_space(base_url, auth, headers, space_key, modified_after=None, 
         if not data:
             break
         pages = data.get("results", [])
-        filtered_pages = [p for p in pages if filter_page(p, modified_after, modified_before, created_in_years)]
+        filtered_pages = [p for p in pages if filter_page(p, modified_after, modified_before, created_in_years, modified_in_years)]
         for page in filtered_pages:
             page_id = page.get("id")
             full_data = safe_request(
@@ -174,11 +180,12 @@ def get_pages_in_space(base_url, auth, headers, space_key, modified_after=None, 
             break
     return all_pages
 
-def filter_page(page, modified_after, modified_before, created_in_years):
+def filter_page(page, modified_after, modified_before, created_in_years, modified_in_years=None):
     """Filter pages based on modification and creation dates.
     
     Args:
         created_in_years: None, single year (int), or list of years ([int])
+        modified_in_years: None, single year (int), or list of years ([int])
     """
     created_date_str = page.get("history", {}).get("createdDate")
     modified_date_str = page.get("version", {}).get("when")
@@ -191,11 +198,16 @@ def filter_page(page, modified_after, modified_before, created_in_years):
     if modified_before and modified_date and modified_date > modified_before:
         return False
     if created_in_years and created_date:
-        # Support both single year and list of years
         if isinstance(created_in_years, list):
             if created_date.year not in created_in_years:
                 return False
         elif created_date.year != created_in_years:
+            return False
+    if modified_in_years and modified_date:
+        if isinstance(modified_in_years, list):
+            if modified_date.year not in modified_in_years:
+                return False
+        elif modified_date.year != modified_in_years:
             return False
     return True
 
@@ -222,11 +234,12 @@ def get_last_editor_email(base_url, auth, headers, page_id):
         logging.error(f"Error fetching editor email for page {page_id}: {e}")
         return "?"
 
-def get_attachments(base_url, auth, headers, page_id, created_in_years=None):
+def get_attachments(base_url, auth, headers, page_id, created_in_years=None, modified_in_years=None):
     """Retrieve attachments for a given page.
     
     Args:
         created_in_years: None, single year (int), or list of years ([int])
+        modified_in_years: None, single year (int), or list of years ([int])
     """
     try:
         url = f"{base_url}/rest/api/content/{page_id}/child/attachment"
@@ -237,22 +250,31 @@ def get_attachments(base_url, auth, headers, page_id, created_in_years=None):
         attachments = data.get("results", [])
         
         # If no filter, return all
-        if not created_in_years:
+        if not created_in_years and not modified_in_years:
             return attachments
         
         filtered = []
         for att in attachments:
-            # Filter by created_in_years (creation date)
             created_str = att.get("history", {}).get("createdDate") or att.get("version", {}).get("when", "")
-            created_date = parse_iso_date(created_str)
+            modified_str = att.get("version", {}).get("when", "")
+            created_date  = parse_iso_date(created_str)
+            modified_date = parse_iso_date(modified_str)
             
-            if created_date:
-                # Support both single year and list of years
+            if created_in_years and created_date:
                 if isinstance(created_in_years, list):
-                    if created_date.year in created_in_years:
-                        filtered.append(att)
-                elif created_date.year == created_in_years:
-                    filtered.append(att)
+                    if created_date.year not in created_in_years:
+                        continue
+                elif created_date.year != created_in_years:
+                    continue
+            
+            if modified_in_years and modified_date:
+                if isinstance(modified_in_years, list):
+                    if modified_date.year not in modified_in_years:
+                        continue
+                elif modified_date.year != modified_in_years:
+                    continue
+            
+            filtered.append(att)
         
         return filtered
         
@@ -285,6 +307,115 @@ def load_patterns(regex_file, single_regex):
         patterns.append(("custom_regex", single_regex, 0))
     return patterns
 
+def load_trufflehog_patterns(yaml_file, filter_keywords=None, exclude_keywords=None):
+    """
+    Load regex patterns from TruffleHog YAML format.
+    
+    Format:
+    - name: AWS API Key
+      keywords:
+      - AWS
+      - API
+      regex:
+        AWS API Key: AKIA[0-9A-Z]{16}
+    
+    Args:
+        yaml_file: Path to TruffleHog YAML file
+        filter_keywords: Optional list of keywords to include detectors by.
+                         A detector is included if ANY of its YAML keywords
+                         matches ANY of the filter keywords (case-insensitive).
+                         If None — all detectors are loaded (unless excluded).
+        exclude_keywords: Optional list of keywords to exclude detectors by.
+                          A detector is excluded if ANY of its YAML keywords
+                          matches ANY of the exclude keywords (case-insensitive).
+                          Applied after filter_keywords. Cannot be combined with
+                          filter_keywords (mutually exclusive).
+    
+    Returns:
+        List of tuples: (name, regex, group_index)
+    """
+    if not yaml:
+        logging.error("PyYAML not installed. Install it with: pip install pyyaml --break-system-packages")
+        return []
+    
+    if not os.path.exists(yaml_file):
+        logging.error(f"TruffleHog YAML file not found: {yaml_file}")
+        return []
+    
+    # Normalize to lowercase sets for case-insensitive comparison
+    filter_kw_lower  = set(k.lower() for k in filter_keywords)  if filter_keywords  else None
+    exclude_kw_lower = set(k.lower() for k in exclude_keywords) if exclude_keywords else None
+    
+    patterns = []
+    skipped_include = 0
+    skipped_exclude = 0
+    
+    try:
+        with open(yaml_file, 'r', encoding='utf-8') as f:
+            data = yaml.safe_load(f)
+        
+        if not data:
+            logging.error(f"Empty or invalid YAML file: {yaml_file}")
+            return []
+        
+        total = len([d for d in data if isinstance(d, dict)])
+        
+        for detector in data:
+            if not isinstance(detector, dict):
+                continue
+            
+            detector_name    = detector.get('name', 'Unknown')
+            detector_keywords = [kw.lower() for kw in detector.get('keywords', [])]
+            regex_dict       = detector.get('regex', {})
+            
+            # --- include filter: skip if no keyword matches ---
+            if filter_kw_lower is not None:
+                if not any(kw in filter_kw_lower for kw in detector_keywords):
+                    skipped_include += 1
+                    continue
+            
+            # --- exclude filter: skip if any keyword matches ---
+            if exclude_kw_lower is not None:
+                if any(kw in exclude_kw_lower for kw in detector_keywords):
+                    skipped_exclude += 1
+                    continue
+            
+            for pattern_name, pattern_regex in regex_dict.items():
+                full_name = pattern_name if pattern_name == detector_name else f"{detector_name} - {pattern_name}"
+                patterns.append((full_name, pattern_regex, 0))
+        
+        # --- summary log ---
+        if filter_kw_lower is not None:
+            logging.info(f"TruffleHog include filter : {sorted(filter_kw_lower)}")
+            logging.info(f"  Detectors matched : {total - skipped_include}/{total}, skipped: {skipped_include}")
+        
+        if exclude_kw_lower is not None:
+            logging.info(f"TruffleHog exclude filter : {sorted(exclude_kw_lower)}")
+            logging.info(f"  Detectors excluded: {skipped_exclude}/{total}")
+        
+        logging.info(f"Loaded {len(patterns)} patterns from TruffleHog YAML: {yaml_file}")
+        
+        if patterns:
+            logging.info("Sample patterns loaded:")
+            for i, (name, regex, _) in enumerate(patterns[:5], 1):
+                logging.info(f"  {i}. {name}: {regex[:60]}...")
+        else:
+            hint = sorted(filter_kw_lower or exclude_kw_lower or [])
+            logging.warning(
+                f"No patterns loaded after applying filters {hint}. "
+                f"Check that keywords match those in your YAML file."
+            )
+        
+        return patterns
+    
+    except yaml.YAMLError as e:
+        logging.error(f"Error parsing TruffleHog YAML file: {e}")
+        return []
+    except Exception as e:
+        logging.error(f"Error loading TruffleHog YAML file: {e}")
+        return []
+
+
 def scan_text_for_keywords(text, keywords):
     """Scan text for keywords (case-insensitive)."""
     findings = []
@@ -308,10 +439,14 @@ def scan_text_for_secrets(text, patterns):
             continue
     return findings
 
-def format_secret_value(value, max_length=20):
+def sanitize_cell(value):
+    """Remove NUL bytes and other characters that break CSV/XLSX writers."""
+    return str(value).replace('\x00', '').replace('\r', ' ')
+
+def format_secret_value(value, max_length=None):
     """Format secret value for display (truncate if needed)."""
-    value_str = str(value).strip()
-    if len(value_str) > max_length:
+    value_str = sanitize_cell(value).strip()
+    if max_length is not None and len(value_str) > max_length:
         return value_str[:max_length] + "..."
     return value_str
 
@@ -331,8 +466,31 @@ def extract_text_from_attachment(base_url, auth, headers, attachment, max_size_b
         return [], ext
     
     try:
-        response = requests.get(download_url, auth=auth, headers=headers, timeout=30)
-        response.raise_for_status()
+        # Retry logic for 500 errors (Confluence occasionally returns 500 for images)
+        max_retries = 3
+        retry_delay = 10  # seconds
+        response = None
+        
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = requests.get(download_url, auth=auth, headers=headers, timeout=30)
+                response.raise_for_status()
+                break  # success
+            except requests.exceptions.HTTPError as e:
+                if response is not None and response.status_code == 500:
+                    if attempt < max_retries:
+                        logging.warning(
+                            f"500 Server Error for {att_title} "
+                            f"(attempt {attempt}/{max_retries}). "
+                            f"Retrying in {retry_delay}s..."
+                        )
+                        time.sleep(retry_delay)
+                    else:
+                        logging.error(f"Error extracting text from {att_title}: {e} — skipping after {max_retries} attempts")
+                        return [], ext
+                else:
+                    raise  # non-500 error, don't retry
+        
         content = response.content
         
         text = ""
@@ -372,8 +530,18 @@ def extract_text_from_attachment(base_url, auth, headers, attachment, max_size_b
         
         # Images with OCR
         elif ext in ["png", "jpg", "jpeg", "gif", "bmp", "tiff"]:
-            img = Image.open(BytesIO(content))
-            text = pytesseract.image_to_string(img)
+            if not content:
+                logging.warning(f"Skipping {att_title}: empty response body")
+            elif content[:4] in (b'\x89PNG', b'\xff\xd8\xff') or content[:3] == b'GIF' or content[:2] == b'BM' or len(content) > 100:
+                try:
+                    img = Image.open(BytesIO(content))
+                    img.verify()  # check integrity without decoding
+                    img = Image.open(BytesIO(content))  # reopen after verify
+                    text = pytesseract.image_to_string(img)
+                except Exception as img_err:
+                    logging.warning(f"Skipping {att_title}: not a valid image file ({img_err})")
+            else:
+                logging.warning(f"Skipping {att_title}: response doesn't look like an image ({len(content)} bytes)")
         
         # Archives (if enabled)
         elif archive_support and ext in ["zip", "tar", "gz", "tgz", "tar.gz"]:
@@ -386,6 +554,10 @@ def extract_text_from_attachment(base_url, auth, headers, attachment, max_size_b
         
         if not text:
             return [], ext
+        
+        # Strip NUL bytes and other problematic characters from extracted text
+        # before scanning — prevents them from ending up in CSV/XLSX
+        text = text.replace('\x00', '').replace('\r', ' ')
         
         # Scan for keywords and patterns
         findings = []
@@ -461,8 +633,8 @@ def validate_arguments(args):
         if not args.token:
             errors.append("--token is required (or use --public-only)")
     
-    if not args.keywords and not args.regex_file and not args.regex:
-        errors.append("At least one of --keywords, --regex, or --regex-file is required")
+    if not args.keywords and not args.regex_file and not args.regex and not getattr(args, 'trufflehog_yaml', None):
+        errors.append("At least one of --keywords, --regex, --regex-file, or --trufflehog-patterns is required")
     
     # Validate mode parameter
     mode = getattr(args, 'mode', None)
@@ -479,6 +651,26 @@ def validate_arguments(args):
     # Validate alert flag
     if args.alert and not args.email_sender:
         errors.append("--email-sender is required when using --alert")
+    
+    # Validate trufflehog keyword filters require --trufflehog-patterns
+    has_th_yaml    = bool(getattr(args, 'trufflehog_yaml', None))
+    has_th_include = bool(getattr(args, 'trufflehog_keywords', None))
+    has_th_exclude = bool(getattr(args, 'trufflehog_exclude_keywords', None))
+    
+    if has_th_include and not has_th_yaml:
+        errors.append("--trufflehog-keywords requires --trufflehog-patterns to be specified")
+    if has_th_exclude and not has_th_yaml:
+        errors.append("--trufflehog-exclude-keywords requires --trufflehog-patterns to be specified")
+    if has_th_include and has_th_exclude:
+        errors.append("--trufflehog-keywords and --trufflehog-exclude-keywords are mutually exclusive — use one or the other")
+    
+    # --trufflehog-patterns is mutually exclusive with --regex-file, --regex and --keywords
+    if has_th_yaml and args.regex_file:
+        errors.append("--trufflehog-patterns and --regex-file are mutually exclusive — use one or the other")
+    if has_th_yaml and args.regex:
+        errors.append("--trufflehog-patterns and --regex are mutually exclusive — use one or the other")
+    if has_th_yaml and args.keywords:
+        errors.append("--trufflehog-patterns and --keywords are mutually exclusive — use one or the other")
     
     return errors
 
@@ -500,10 +692,11 @@ def create_xlsx_report(csv_file, xlsx_file):
         return False
     
     try:
-        # Read CSV
-        with open(csv_file, 'r', encoding='utf-8') as f:
-            reader = csv.reader(f)
-            rows = list(reader)
+        # Read CSV and strip NUL bytes that would break openpyxl
+        with open(csv_file, 'r', encoding='utf-8', errors='replace') as f:
+            content_clean = f.read().replace('\x00', '')
+        reader = csv.reader(content_clean.splitlines())
+        rows = list(reader)
         
         if len(rows) < 2:
             logging.warning("No data to create XLSX report")
@@ -1115,14 +1308,13 @@ def validate_csv_fields(space_name, title, page_url, keyword, finding_type, form
     Validate and sanitize all fields before writing to CSV.
     Ensures all fields are non-empty strings to prevent column shifting.
     """
-    # Validate and provide defaults for each field
-    safe_space_name = str(space_name).strip() if space_name else "Unknown Space"
-    safe_title = str(title).strip() if title and str(title).strip() != "?" else "Untitled Page"
-    safe_page_url = str(page_url).strip() if page_url else "No URL"
-    safe_keyword = str(keyword).strip() if keyword else "Unknown Keyword"
-    safe_finding_type = str(finding_type).strip() if finding_type else "unknown"
-    safe_formatted_value = str(formatted_value).strip() if formatted_value else "No Value"
-    safe_email = str(email).strip() if email and str(email).strip() != "?" else "unknown@unknown.com"
+    safe_space_name = sanitize_cell(space_name).strip() if space_name else "Unknown Space"
+    safe_title = sanitize_cell(title).strip() if title and str(title).strip() != "?" else "Untitled Page"
+    safe_page_url = sanitize_cell(page_url).strip() if page_url else "No URL"
+    safe_keyword = sanitize_cell(keyword).strip() if keyword else "Unknown Keyword"
+    safe_finding_type = sanitize_cell(finding_type).strip() if finding_type else "unknown"
+    safe_formatted_value = sanitize_cell(formatted_value).strip() if formatted_value else "No Value"
+    safe_email = sanitize_cell(email).strip() if email and str(email).strip() != "?" else "unknown@unknown.com"
     
     # Log warning if any field was replaced with default
     if not space_name or not str(space_name).strip():
@@ -1140,16 +1332,16 @@ def validate_attachment_fields(space_name, page_title, file_title, ext, file_url
     Validate and sanitize attachment fields before writing to CSV.
     Ensures all 10 fields are non-empty strings to prevent column shifting.
     """
-    safe_space_name = str(space_name).strip() if space_name else "Unknown Space"
-    safe_page_title = str(page_title).strip() if page_title and str(page_title).strip() != "?" else "Untitled Page"
-    safe_file_title = str(file_title).strip() if file_title and str(file_title).strip() != "?" else "Unknown File"
-    safe_ext = str(ext).strip() if ext else "unknown"
-    safe_file_url = str(file_url).strip() if file_url else "No URL"
-    safe_page_url = str(page_url).strip() if page_url else "No URL"
-    safe_keyword = str(keyword).strip() if keyword else "Unknown Keyword"
-    safe_finding_type = str(finding_type).strip() if finding_type else "unknown"
-    safe_formatted_value = str(formatted_value).strip() if formatted_value else "No Value"
-    safe_email = str(email).strip() if email and str(email).strip() != "?" else "unknown@unknown.com"
+    safe_space_name = sanitize_cell(space_name).strip() if space_name else "Unknown Space"
+    safe_page_title = sanitize_cell(page_title).strip() if page_title and str(page_title).strip() != "?" else "Untitled Page"
+    safe_file_title = sanitize_cell(file_title).strip() if file_title and str(file_title).strip() != "?" else "Unknown File"
+    safe_ext = sanitize_cell(ext).strip() if ext else "unknown"
+    safe_file_url = sanitize_cell(file_url).strip() if file_url else "No URL"
+    safe_page_url = sanitize_cell(page_url).strip() if page_url else "No URL"
+    safe_keyword = sanitize_cell(keyword).strip() if keyword else "Unknown Keyword"
+    safe_finding_type = sanitize_cell(finding_type).strip() if finding_type else "unknown"
+    safe_formatted_value = sanitize_cell(formatted_value).strip() if formatted_value else "No Value"
+    safe_email = sanitize_cell(email).strip() if email and str(email).strip() != "?" else "unknown@unknown.com"
     
     # Log warnings
     if not page_title or str(page_title).strip() == "?":
@@ -1160,12 +1352,12 @@ def validate_attachment_fields(space_name, page_title, file_title, ext, file_url
     return (safe_space_name, safe_page_title, safe_file_title, safe_ext, safe_file_url,
             safe_page_url, safe_keyword, safe_finding_type, safe_formatted_value, safe_email)
 
-def process_space(base_url, auth, headers, space, keywords, patterns, writer, csvfile, include_attachments, allowed_types, excluded_types, max_size_bytes, mod_after, mod_before, created_years, no_duplicates, secret_max_length, scan_images_only, archive_support, findings_set, debug_limit=None, current_total=0):
+def process_space(base_url, auth, headers, space, keywords, patterns, writer, csvfile, include_attachments, allowed_types, excluded_types, max_size_bytes, mod_after, mod_before, created_years, modified_in_years, no_duplicates, secret_max_length, scan_images_only, archive_support, findings_set, debug_limit=None, current_total=0):
     """Process a single Confluence space."""
     space_key = space.get("key", "?")
     space_name = space.get("name", space_key).strip()
     logging.info(f"Processing space: {space_key} - {space_name}")
-    pages = get_pages_in_space(base_url, auth, headers, space_key, mod_after, mod_before, created_years)
+    pages = get_pages_in_space(base_url, auth, headers, space_key, mod_after, mod_before, created_years, modified_in_years)
     
     total_files_in_space = 0
     total_secrets_in_space = 0
@@ -1174,7 +1366,7 @@ def process_space(base_url, auth, headers, space, keywords, patterns, writer, cs
     # Don't reopen file - use existing writer
     for page in pages:
         secrets_found, files_scanned = process_page(base_url, auth, headers, page, space_name, space_key, writer, csvfile, keywords, patterns, include_attachments, allowed_types, excluded_types, max_size_bytes, no_duplicates, secret_max_length,
-            scan_images_only, archive_support, findings_set, created_years
+            scan_images_only, archive_support, findings_set, created_years, modified_in_years
         )
         total_secrets_in_space += secrets_found
         total_files_in_space += files_scanned
@@ -1191,7 +1383,7 @@ def process_space(base_url, auth, headers, space, keywords, patterns, writer, cs
     
     return total_secrets_in_space, total_files_in_space, total_pages_in_space
 
-def process_page(base_url, auth, headers, page, space_name, space_key, writer, csvfile, keywords, patterns, include_attachments, allowed_types, excluded_types, max_size_bytes, no_duplicates, secret_max_length, scan_images_only, archive_support, findings_set, created_years=None):
+def process_page(base_url, auth, headers, page, space_name, space_key, writer, csvfile, keywords, patterns, include_attachments, allowed_types, excluded_types, max_size_bytes, no_duplicates, secret_max_length, scan_images_only, archive_support, findings_set, created_years=None, modified_in_years=None):
     """Process a single Confluence page."""
     title = page.get("title", "?")
     page_id = page.get("id", "?")
@@ -1200,7 +1392,7 @@ def process_page(base_url, auth, headers, page, space_name, space_key, writer, c
     secrets_found = 0
     
     if include_attachments:
-        attachments = get_attachments(base_url, auth, headers, page_id, created_years)
+        attachments = get_attachments(base_url, auth, headers, page_id, created_years, modified_in_years)
         total_files_in_page = len(attachments)
         filtered_attachments = [
             att for att in attachments
@@ -1265,15 +1457,34 @@ def process_page(base_url, auth, headers, page, space_name, space_key, writer, c
 def main(base_url, username, token, keywords_file, regex_file, single_regex, output_file, 
          filetypes, exclude_filetypes, max_size, public_only,
          space_keys, exclude_space_keys, modified_after, modified_before, created_in_year,
-         no_duplicates, resume_from, scan_images_only, archive_support, 
+         modified_in_year, no_duplicates, resume_from, scan_images_only, archive_support, 
          config, email_sender, email_recipient, aws_region, secret_max_length, debug_mode,
-         alert, security_contact, security_wiki, mode=None, _recursive=False):
+         alert, security_contact, security_wiki, mode=None, trufflehog_yaml=None,
+         trufflehog_keywords=None, trufflehog_exclude_keywords=None, _recursive=False):
     """Main function to scan Confluence for keywords and secrets."""
     start_time = time.time()
     
     # Only setup logging on first (non-recursive) call
     if not _recursive:
         setup_logging()
+        
+        # Remove previous scan results before starting
+        output_dir = os.path.dirname(os.path.abspath(output_file))
+        base_output = output_file.replace('.csv', '')
+        files_to_clean = [
+            output_file,
+            f"{base_output}_pages.csv",
+            f"{base_output}_files.csv",
+            os.path.join(output_dir, "confluence_secrets.xlsx"),
+            os.path.join(output_dir, "confluence_secrets_in_files.xlsx"),
+        ]
+        for f in files_to_clean:
+            if os.path.exists(f):
+                try:
+                    os.remove(f)
+                    logging.info(f"Removed previous result: {os.path.basename(f)}")
+                except Exception as e:
+                    logging.warning(f"Could not remove {os.path.basename(f)}: {e}")
     
     # Handle mode parameter
     # If mode is None, scan only pages (default behavior)
@@ -1295,9 +1506,12 @@ def main(base_url, username, token, keywords_file, regex_file, single_regex, out
         main(base_url, username, token, keywords_file, regex_file, single_regex, pages_csv,
              filetypes, exclude_filetypes, max_size, public_only,
              space_keys, exclude_space_keys, modified_after, modified_before, created_in_year,
-             no_duplicates, resume_from, scan_images_only, archive_support,
+             modified_in_year, no_duplicates, resume_from, scan_images_only, archive_support,
              config, None, None, aws_region, secret_max_length, debug_mode,  # email_sender=None, email_recipient=None
-             alert, security_contact, security_wiki, mode=None, _recursive=True)  # Recursive call
+             alert, security_contact, security_wiki, mode=None,
+             trufflehog_yaml=trufflehog_yaml, trufflehog_keywords=trufflehog_keywords,
+             trufflehog_exclude_keywords=trufflehog_exclude_keywords,
+             _recursive=True)  # Recursive call
         
         # Scan files second (without sending email)
         logging.info("\n" + "=" * 80)
@@ -1306,9 +1520,12 @@ def main(base_url, username, token, keywords_file, regex_file, single_regex, out
         main(base_url, username, token, keywords_file, regex_file, single_regex, files_csv,
              filetypes, exclude_filetypes, max_size, public_only,
              space_keys, exclude_space_keys, modified_after, modified_before, created_in_year,
-             no_duplicates, resume_from, scan_images_only, archive_support,
+             modified_in_year, no_duplicates, resume_from, scan_images_only, archive_support,
              config, None, None, aws_region, secret_max_length, debug_mode,  # email_sender=None, email_recipient=None
-             alert, security_contact, security_wiki, mode="files", _recursive=True)  # Recursive call
+             alert, security_contact, security_wiki, mode="files",
+             trufflehog_yaml=trufflehog_yaml, trufflehog_keywords=trufflehog_keywords,
+             trufflehog_exclude_keywords=trufflehog_exclude_keywords,
+             _recursive=True)  # Recursive call
         
         logging.info("\n" + "=" * 80)
         logging.info("BOTH MODE COMPLETED - Check confluence_secrets.xlsx and confluence_secrets_in_files.xlsx")
@@ -1441,6 +1658,26 @@ Please review both reports and take appropriate action.
     headers = {"Accept": "application/json"}
     keywords = load_keywords(keywords_file) if keywords_file else []
     patterns = load_patterns(regex_file, single_regex)
+    
+    # Load TruffleHog patterns if specified and merge with existing patterns
+    if trufflehog_yaml:
+        # Parse trufflehog_keywords from comma-separated string to list (if provided)
+        th_filter  = None
+        th_exclude = None
+        if trufflehog_keywords:
+            th_filter = [k.strip() for k in trufflehog_keywords.split(',') if k.strip()]
+        if trufflehog_exclude_keywords:
+            th_exclude = [k.strip() for k in trufflehog_exclude_keywords.split(',') if k.strip()]
+        
+        trufflehog_patterns = load_trufflehog_patterns(
+            trufflehog_yaml,
+            filter_keywords=th_filter,
+            exclude_keywords=th_exclude
+        )
+        if trufflehog_patterns:
+            patterns.extend(trufflehog_patterns)
+            logging.info(f"Total patterns after merging TruffleHog: {len(patterns)}")
+    
     allowed_types = set([t.lower() for t in filetypes.split(",")]) if filetypes else None
     excluded_types = set([t.lower() for t in exclude_filetypes.split(",")]) if exclude_filetypes else set()
     max_size_bytes = parse_size(max_size) if max_size else None
@@ -1466,6 +1703,16 @@ Please review both reports and take appropriate action.
         except ValueError:
             logging.error(f"Invalid year format in --created-in-year: {created_in_year}")
             created_years = None
+
+    # Parse modified_in_year - support single year or comma-separated list
+    modified_years = None
+    if modified_in_year:
+        try:
+            years_str = [y.strip() for y in modified_in_year.split(',')]
+            modified_years = [int(y) for y in years_str if y]
+        except ValueError:
+            logging.error(f"Invalid year format in --modified-in-year: {modified_in_year}")
+            modified_years = None
 
     if not keywords and not patterns:
         logging.error("No search criteria provided. Specify --keywords, --regex, or --regex-file")
@@ -1532,7 +1779,7 @@ Please review both reports and take appropriate action.
             secrets_in_space, files_in_space, pages_in_space = process_space(
                 base_url, auth, headers, space, keywords, patterns, writer, csvfile,
                 include_attachments, allowed_types, excluded_types, max_size_bytes, 
-                mod_after, mod_before, created_years, no_duplicates, 
+                mod_after, mod_before, created_years, modified_years, no_duplicates, 
                 secret_max_length, scan_images_only, archive_support, findings_set, 
                 debug_limit, total_secrets
             )
@@ -1736,71 +1983,114 @@ if __name__ == "__main__":
         epilog="""
 Examples:
   # Basic scan (pages only, default)
-  python3 confluence_improved_v5.py --base-url https://your-org.atlassian.net \\
+  python3 confluence.py --base-url https://your-org.atlassian.net \\
     --username user@example.com --token YOUR_TOKEN --regex-file regex.txt
 
   # Scan only files/attachments
-  python3 confluence_improved_v5.py --base-url https://your-org.atlassian.net \\
+  python3 confluence.py --base-url https://your-org.atlassian.net \\
     --username user@example.com --token YOUR_TOKEN --regex-file regex.txt \\
     -m files --filetype docx,pdf,json
 
   # Scan both pages and files separately (creates 2 reports)
-  python3 confluence_improved_v5.py --base-url https://your-org.atlassian.net \\
+  python3 confluence.py --base-url https://your-org.atlassian.net \\
     --username user@example.com --token YOUR_TOKEN --regex-file regex.txt \\
     -m both --filetype docx,pdf,json
 
   # Public-only scan
-  python3 confluence_improved_v5.py --base-url https://your-org.atlassian.net \\
+  python3 confluence.py --base-url https://your-org.atlassian.net \\
     --public-only --regex-file regex.txt
     
   # Scan with author alerts
-  python3 confluence_improved_v5.py --base-url https://your-org.atlassian.net \\
+  python3 confluence.py --base-url https://your-org.atlassian.net \\
     --username user@example.com --token YOUR_TOKEN --regex-file regex.txt \\
     --email-sender security@company.com --alert --security-contact appsec@company.com
     
   # Send results to multiple recipients
-  python3 confluence_improved_v5.py --base-url https://your-org.atlassian.net \\
+  python3 confluence.py --base-url https://your-org.atlassian.net \\
     --username user@example.com --token YOUR_TOKEN --regex-file regex.txt \\
     --email-sender security@company.com --email-recipient "appsec@company.com,team@company.com"
         """
     )
-    parser.add_argument("--base-url", help="Base Confluence URL")
-    parser.add_argument("--username", help="API login (email) - not required with --public-only")
-    parser.add_argument("--token", help="API token - not required with --public-only")
-    parser.add_argument("--public-only", action="store_true", help="Scan only public spaces without authentication")
-    parser.add_argument("--keywords", help="File with keywords (one per line)")
-    parser.add_argument("--regex-file", help="Regex file with patterns in 'Name:::Regex:::GroupIndex' format")
-    parser.add_argument("--regex", help="Single regex pattern (legacy)")
-    parser.add_argument("-m", "--mode", choices=["files", "both"], 
-                       help="Scan mode: 'files' (only attachments), 'both' (pages and files separately, creates 2 reports). Default: scan pages only")
-    parser.add_argument("--filetype", help="Comma-separated file types to scan (only with --mode files or both), e.g., docx,pdf,json")
-    parser.add_argument("--exclude-filetype", help="Comma-separated file types to exclude (only with --mode files or both), e.g., pdf")
-    parser.add_argument("--max-size", help="Max file size to analyze (only with --mode files or both), e.g., 2mb, 500kb")
-    parser.add_argument("--space-keys", help="Space keys to scan (comma-separated or file path)")
-    parser.add_argument("--exclude-space-keys", help="Space keys to exclude (comma-separated or file path)")
-    parser.add_argument("--modified-after", help="Scan pages modified after this date (D.M.Y or D/M/Y)")
-    parser.add_argument("--modified-before", help="Scan pages modified before this date (D.M.Y or D/M/Y)")
-    parser.add_argument("--created-in-year", help="Scan pages and files created in this year or years (e.g., 2025 or 2025,2026)")
-    parser.add_argument("--no-duplicates", action="store_true", help="Exclude duplicate findings")
-    parser.add_argument("--resume-from", help="Resume scanning from this space key")
-    parser.add_argument("--scan-images-only", action="store_true", help="Scan only images with OCR")
-    parser.add_argument("--archive-support", action="store_true", help="Unpack and scan archives (zip, tar, etc.)")
-    parser.add_argument("--secret-max-length", type=int, default=20, help="Maximum characters to display in 'Matched Value' column (default: 20)")
-    parser.add_argument("--config", help="JSON config file with arguments")
-    parser.add_argument("--debug", action="store_true", help="Debug mode: stop after first 5 findings and generate report")
-    
-    # Email notification arguments
-    parser.add_argument("--email-sender", help="Sender email address for notifications (must be verified in AWS SES)")
-    parser.add_argument("--email-recipient", help="Recipient email address(es) for scan results (single email or comma-separated list, e.g., 'user1@example.com,user2@example.com')")
-    parser.add_argument("--aws-region", default="eu-central-1", help="AWS region for SES (default: eu-central-1)")
-    
-    # Author alert arguments
-    parser.add_argument("--alert", action="store_true", help="Send individual email alerts to page editors who leaked secrets")
-    parser.add_argument("--security-contact", default="security@company.com", help="Security team contact email for author alerts (default: security@company.com)")
-    parser.add_argument("--security-wiki", help="Security documentation URL (optional, included in author alerts)")
-    
-    # Output file (moved to end)
-    parser.add_argument("-o", "--output", default="confluence_results.csv", help="Output CSV file (XLSX will be auto-generated)")
+    # ── 1. Connection ────────────────────────────────────────────────────────────
+    conn = parser.add_argument_group("Connection")
+    conn.add_argument("--base-url",    help="Base Confluence URL")
+    conn.add_argument("--username",    help="API login (email) — not required with --public-only")
+    conn.add_argument("--token",       help="API token — not required with --public-only")
+    conn.add_argument("--public-only", action="store_true",
+                      help="Scan only public spaces without authentication")
+
+    # ── 2. Scan mode ─────────────────────────────────────────────────────────────
+    mode_grp = parser.add_argument_group("Scan mode")
+    mode_grp.add_argument("-m", "--mode", choices=["files", "both"],
+                          help="'files' — attachments only; 'both' — pages + files (2 reports). "
+                               "Default: pages only")
+    mode_grp.add_argument("--space-keys",         help="Space keys to scan (comma-separated or file path)")
+    mode_grp.add_argument("--exclude-space-keys", help="Space keys to exclude (comma-separated or file path)")
+    mode_grp.add_argument("--resume-from",        help="Resume scanning from this space key")
+    mode_grp.add_argument("--no-duplicates",      action="store_true", help="Exclude duplicate findings")
+
+    # ── 3. Patterns ───────────────────────────────────────────────────────────────
+    pat = parser.add_argument_group("Patterns (at least one required)")
+    pat.add_argument("--keywords",    help="File with keywords, one per line")
+    pat.add_argument("--regex-file",  help="Regex file in 'Name:::Regex:::GroupIndex' format")
+    pat.add_argument("--regex",       help="Single regex pattern (legacy)")
+    pat.add_argument("--trufflehog-patterns", "-tp", dest="trufflehog_yaml",
+                     nargs="?", const="trufflehog.yaml", default=None,
+                     metavar="FILE",
+                     help="TruffleHog YAML file with detectors (default: `trufflehog.yaml` in current directory)")
+    pat.add_argument("--trufflehog-keywords", "-tk", dest="trufflehog_keywords",
+                     metavar="KEYWORDS",
+                     help="Include only TruffleHog detectors whose 'keywords' match any of these. "
+                          "Example: -tk aws,api,internal")
+    pat.add_argument("--trufflehog-exclude-keywords", "-tek", dest="trufflehog_exclude_keywords",
+                     metavar="KEYWORDS",
+                     help="Exclude TruffleHog detectors whose 'keywords' match any of these. "
+                          "Mutually exclusive with -tk. Example: -tek gateway,arn")
+
+    # ── 4. File / attachment options ──────────────────────────────────────────────
+    files = parser.add_argument_group("File / attachment options  (require -m files or -m both)")
+    files.add_argument("--filetype",         help="File types to scan, e.g. docx,pdf,json")
+    files.add_argument("--exclude-filetype", help="File types to exclude, e.g. pdf")
+    files.add_argument("--max-size",         help="Max file size to analyse, e.g. 2mb, 500kb")
+    files.add_argument("--scan-images-only", action="store_true", help="Scan only images via OCR")
+    files.add_argument("--archive-support",  action="store_true",
+                       help="Unpack and scan archives (zip, tar, etc.)")
+
+    # ── 5. Date filters ───────────────────────────────────────────────────────────
+    dates = parser.add_argument_group("Date filters")
+    dates.add_argument("--modified-after",  help="Pages modified after this date (D.M.Y or D/M/Y)")
+    dates.add_argument("--modified-before", help="Pages modified before this date (D.M.Y or D/M/Y)")
+    dates.add_argument("--created-in-year", help="Filter by creation year (not last modified). Single year or comma-separated list, e.g. 2025 or 2024,2025")
+    dates.add_argument("--modified-in-year", help="Filter by last-modified year (not creation date). Single year or comma-separated list, e.g. 2026 or 2025,2026")
+
+    # ── 6. Output ─────────────────────────────────────────────────────────────────
+    out = parser.add_argument_group("Output")
+    out.add_argument("-o", "--output", default="confluence_results.csv",
+                     help="Output CSV file (XLSX auto-generated alongside it)")
+    out.add_argument("--secret-max-length", type=int, default=None,
+                     help="Max characters shown in 'Matched Value' column. Default: full value")
+
+    # ── 7. Email notifications ────────────────────────────────────────────────────
+    email = parser.add_argument_group("Email notifications  (requires AWS SES)")
+    email.add_argument("--email-sender",    help="Verified SES sender address")
+    email.add_argument("--email-recipient", help="Recipient(s) for scan report, comma-separated")
+    email.add_argument("--aws-region",      default="eu-central-1",
+                       help="AWS SES region (default: eu-central-1)")
+
+    # ── 8. Author alerts ──────────────────────────────────────────────────────────
+    alerts = parser.add_argument_group("Author alerts  (notify page editors directly)")
+    alerts.add_argument("--alert", action="store_true",
+                        help="Send individual alerts to editors who leaked secrets")
+    alerts.add_argument("--security-contact", default="security@company.com",
+                        help="Security team email shown in alert (default: security@company.com)")
+    alerts.add_argument("--security-wiki",
+                        help="Security docs URL included in author alerts (optional)")
+
+    # ── 9. Misc ───────────────────────────────────────────────────────────────────
+    misc = parser.add_argument_group("Misc")
+    misc.add_argument("--config", help="JSON config file — values are overridden by CLI flags")
+    misc.add_argument("--debug",  action="store_true",
+                      help="Stop after first 5 findings and generate report")
     
     args = parser.parse_args()
     
@@ -1830,6 +2120,7 @@ Examples:
         modified_after=args.modified_after,
         modified_before=args.modified_before,
         created_in_year=args.created_in_year,
+        modified_in_year=getattr(args, 'modified_in_year', None),
         no_duplicates=args.no_duplicates,
         resume_from=args.resume_from,
         scan_images_only=args.scan_images_only,
@@ -1843,5 +2134,8 @@ Examples:
         alert=args.alert,
         security_contact=args.security_contact,
         security_wiki=args.security_wiki,
-        mode=getattr(args, 'mode', None)
+        mode=getattr(args, 'mode', None),
+        trufflehog_yaml=args.trufflehog_yaml,
+        trufflehog_keywords=getattr(args, 'trufflehog_keywords', None),
+        trufflehog_exclude_keywords=getattr(args, 'trufflehog_exclude_keywords', None)
     )
