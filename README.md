@@ -80,7 +80,22 @@ docker run --rm \
   --no-duplicates
 ```
 
-**4. Scan without credentials (public spaces only):**
+**4. Scan pages + attachments with trufflehog patterns:**
+```bash
+docker run --rm \
+  -v $(pwd)/output:/output \
+  -v $(pwd)/trufflehog.yaml:/app/trufflehog.yaml:ro \
+  confluence-scanner \
+  --base-url https://your-org.atlassian.net \
+  --username user@example.com \
+  --token YOUR_API_TOKEN \
+  --trufflehog-patterns \
+  --output /output/results.csv \
+  -m both \
+  --no-duplicates
+```
+
+**5. Scan without credentials (public spaces only):**
 ```bash
 docker run --rm \
   -v $(pwd)/output:/output \
@@ -159,9 +174,9 @@ Results are saved to the directory specified in `--output`.
 | `--regex-file` | Path to regex patterns file (`Name:::Regex:::GroupIndex`) |
 | `--regex` | Single regex pattern (legacy, simple use) |
 | `--keywords` | Path to keywords file (one keyword per line) |
-| `--trufflehog-patterns`, `-tp` | Path to a TruffleHog YAML file with detectors |
-| `--trufflehog-keywords`, `-tk` | Include only TruffleHog detectors whose keywords field matches any of the specified values. **Example:** `aws,api,internal` |
-| `--trufflehog-exclude-keywords`, `-tek` | Exclude TruffleHog detectors whose keywords field matches any of the specified values. **Example:** `gateway,arn` |
+| `--trufflehog-patterns`, `-tp`  | Path to a TruffleHog YAML file with detectors |
+| `--trufflehog-keywords`, `-tk`  | Include only TruffleHog detectors whose keywords field matches any of the specified values. **Example:** `aws,api,internal` |
+| `--trufflehog-exclude-keywords`, `-tek`  | Exclude TruffleHog detectors whose keywords field matches any of the specified values. **Example:** `gateway,arn` |
 
 ### Scan mode
 
