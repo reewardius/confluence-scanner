@@ -27,7 +27,7 @@ GitHub OAuth Token:::(?:^|[^a-z0-9_])(gho_[0-9a-zA-Z]{36})(?:[^a-zA-Z0-9]|$):::1
 GitHub App Token:::(?:^|[^a-z0-9_])(ghu_[0-9a-zA-Z]{36})(?:[^a-zA-Z0-9]|$):::1
 GitHub Refresh Token:::(?:^|[^a-z0-9_])(ghr_[0-9a-zA-Z]{36})(?:[^a-zA-Z0-9]|$):::1
 GitHub Fine-grained Token:::(?:^|[^a-z0-9_])(github_pat_[0-9a-zA-Z_]{82})(?:[^a-zA-Z0-9_]|$):::1
-GitLab Personal Access Token:::(?:^|[^a-z0-9\-])(glpat-[0-9a-zA-Z\-_]{20,})(?:[^a-zA-Z0-9\-_]|$):::1
+GitLab Personal Access Token:::(?:^|[^a-z0-9\-])(glpat-(?!(.)\2{19,})[0-9a-zA-Z\-_]{20,})(?:[^a-zA-Z0-9\-_]|$):::1
 GitLab Pipeline Trigger Token:::(?:^|[^a-z0-9])(glptt-[0-9a-f]{40})(?:[^a-f0-9]|$):::1
 GitLab Runner Token:::(?:^|[^a-z0-9\-])(glrt-[0-9a-zA-Z_\-]{20,})(?:[^a-zA-Z0-9_\-]|$):::1
 Slack Token:::(?:^|[^a-z])(xox[pborsa]-[0-9]{10,13}-[0-9]{10,13}-[0-9]{10,13}-[a-z0-9]{32})(?:[^a-z0-9\-]|$):::1
