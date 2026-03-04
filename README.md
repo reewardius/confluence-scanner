@@ -205,7 +205,7 @@ Results are saved to the directory specified in `--output`.
 | Argument | Description |
 |----------|-------------|
 | `-o`, `--output` | Output CSV file path (default: `confluence_results.csv`). XLSX is auto-generated alongside. |
-| `--secret-max-length` | Max characters shown in "Matched Value" column (default: `20`) |
+| `--secret-max-length <int>` | Max characters shown in "Matched Value" column (default: `full value`) |
 | `--config` | Path to JSON config file with arguments |
 | `--debug` | Stop after first 5 findings and generate report |
 | `--resume-from` | Resume scan from a specific space key |
