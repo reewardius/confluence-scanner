@@ -2,6 +2,14 @@
 # BALANCED Secret Scanning Patterns
 # Format: Name:::Regex:::GroupIndex
 # ============================================================================
+# Improvements:
+# - Generic patterns now require assignment operator (= or :)
+# - Generic patterns require quotes around values
+# - Password/Secret require exact variable names (password, secret)
+# - JWT/Bearer tokens kept (useful for real credential detection)
+# - Minimum length increased for generic patterns
+# ============================================================================
+
 
 # CLOUD PROVIDERS
 AWS Access Key ID:::(?:^|[^A-Za-z0-9])((AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA)(?!([A-Z0-9])\3{5,})[A-Z0-9]{16})(?:[^A-Za-z0-9]|$):::1
@@ -51,12 +59,8 @@ Vault Service Token:::(?:^|[^a-z0-9\.])(hvs\.[a-zA-Z0-9_\-]{90,120})(?:[^a-zA-Z0
 Vault Batch Token:::(?:^|[^a-z0-9\.])(hvb\.[\w\-]{138,300})(?:[^a-zA-Z0-9_\-]|$):::1
 
 # AI / ML SERVICES
-# OpenAI API Keys
-# Old format: sk-... (51-52 chars total, so 48-49 after prefix)
-# New format: sk-proj-... (up to 164 chars total, so ~43-155 after prefix)
-# Contains: alphanumeric, forward slashes, plus signs
-OpenAI API Key (Legacy):::(?:^|[^a-zA-Z0-9/+\-])(sk-[a-zA-Z0-9/+]{46,52})(?:[^a-zA-Z0-9/+]|$):::1
-OpenAI API Key (Project):::(?:^|[^a-zA-Z0-9/+\-])(sk-proj-[a-zA-Z0-9/+\-]{40,})(?:[^a-zA-Z0-9/+\-]|$):::1
+OpenAI API Key:::(?:^|[^a-z\-])(sk-[a-zA-Z0-9]{20}T3BlbkFJ[a-zA-Z0-9]{20})(?:[^a-zA-Z0-9]|$):::1
+OpenAI API Key (New Format):::(?:^|[^a-z\-])(sk-proj-[a-zA-Z0-9_-]{48,})(?:[^a-zA-Z0-9_-]|$):::1
 Anthropic API Key:::(?:^|[^a-z\-])(sk-ant-api03-[a-zA-Z0-9\-_]{93,})(?:[^a-zA-Z0-9\-_]|$):::1
 Hugging Face Token:::(?:^|[^a-z_])(hf_[a-zA-Z0-9]{32,})(?:[^a-zA-Z0-9]|$):::1
 Replicate API Token:::(?:^|[^a-z0-9_])(r8_[a-zA-Z0-9]{32})(?:[^a-zA-Z0-9]|$):::1
@@ -68,8 +72,10 @@ MongoDB Connection String:::mongodb(?:\+srv)?://[a-zA-Z0-9\-_.]+:([^@\s"']{8,})@
 Redis Connection String with Password:::redis://(?:[a-zA-Z0-9\-_.]+:)?([^@\s"']{8,})@[a-zA-Z0-9\-_.]+:[0-9]{2,5}:::0
 
 # GENERIC PATTERNS (STRICT CONTEXT)
-Generic Password (Quoted):::(?:password|PASSWORD|Password)\s*[:=]\s*["'](?!<|\$\{|__|%|\{\{|\[|your[_-]|example[_-]|test[_-]|sample[_-]|dummy[_-]|set[_-]password|encrypted[_-]password|password[_-]value|Endpoint=)(?!.*\*\*\*)(?!.*\{\{)(?!.*__.*__)([^"'<>{};\[\]$%*]{8,})["']:::1
-Generic Password (Unquoted):::(?:password|PASSWORD|Password)\s*[:=]\s*(?!<|\$\{|__|%|\{\{|\[|your[_-]|example[_-]|test[_-]|sample[_-]|dummy[_-]|set[_-]password|encrypted[_-]password|password[_-]value|Endpoint=)([^\s"'<>{};\[\]$%*]{8,})(?:\s|$|;|,|\)):::1
+Generic Password Assignment:::(?:password|PASSWORD|Password)\s*[:=]\s*["'](?!<|\$\{|__|%|\{\{|\[|your[_-]|example[_-]|test[_-]|sample[_-]|dummy[_-]|set[_-]password|encrypted[_-]password|password[_-]value|Endpoint=)(?!.*\*\*\*)(?!.*\{\{)(?!.*__.*__)([^"'<>{};\[\]$%*]{12,})["']:::1
 Generic Secret:::(?:secret|SECRET|Secret)\s*[:=]\s*["'](?!<|\$\{|__|%|\{\{|\[|your_|example_|test_|sample_|dummy_)(?!.*<.*>)(?!.*:.*:)(?!.*__.*__)([^"'<>{}\[\]$%:]{12,})["']:::1
 Generic API Key:::(?:api_key|API_KEY|apikey|APIKEY)\s*[:=]\s*["'](?!<|\$\{|%|\{\{|\[|your_|example_|test_)([a-zA-Z0-9\-_]{32,})["']:::1
 Generic Access Token:::(?:access_token|ACCESS_TOKEN|accessToken)\s*[:=]\s*["'](?!<|\$\{|%|\{\{|\[|your_|example_|test_)([a-zA-Z0-9\-_]{32,})["']:::1
+
+# JWT
+JWT Token:::(?:^|[^a-zA-Z0-9\-_.])(eyJ[a-zA-Z0-9\-_]{10,}\.[a-zA-Z0-9\-_]{10,}\.[a-zA-Z0-9\-_]{10,})(?:[^a-zA-Z0-9\-_.]|$):::1
