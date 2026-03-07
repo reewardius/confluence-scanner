@@ -10,7 +10,6 @@ import pytesseract
 import os
 import warnings
 import time
-import psutil
 from datetime import datetime, timedelta
 import logging
 import json
@@ -82,16 +81,6 @@ def check_dependencies():
     if not Workbook:
         errors.append("openpyxl is required for .xlsx support (pip install openpyxl)")
     return errors
-
-def throttle_cpu(max_percent=50, interval=1):
-    """Throttle CPU usage to prevent overloading."""
-    proc = psutil.Process(os.getpid())
-    while True:
-        usage = proc.cpu_percent(interval=interval)
-        if usage > max_percent:
-            sleep_time = interval * (usage / max_percent - 1)
-            time.sleep(min(sleep_time, 2))
-        break
 
 def safe_request(url, headers, auth=None, params=None):
     """Make a safe HTTP request with error handling."""
@@ -1454,13 +1443,52 @@ def process_page(base_url, auth, headers, page, space_name, space_key, writer, c
     
     return secrets_found, total_files_in_page
 
-def main(base_url, username, token, keywords_file, regex_file, single_regex, output_file, 
+def export_findings_to_json(csv_file, json_file, include_attachments, scan_stats=None):
+    """
+    Read the CSV output and export findings to a structured JSON file.
+
+    Args:
+        csv_file:            Path to the CSV produced by the scan.
+        json_file:           Destination JSON path.
+        include_attachments: Whether the scan included attachments (affects CSV columns).
+        scan_stats:          Optional dict with summary statistics to embed in the JSON.
+    """
+    findings = []
+    try:
+        with open(csv_file, 'r', encoding='utf-8', errors='replace') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                # Skip the dummy row used to work-around the first-row bug
+                values = list(row.values())
+                if values and "DUMMY_ROW_DELETE_ME" in str(values[0]):
+                    continue
+                findings.append(dict(row))
+    except Exception as e:
+        logging.error(f"Error reading CSV for JSON export: {e}")
+
+    output = {
+        "generated_at": datetime.now().isoformat(),
+        "scan_stats": scan_stats or {},
+        "total_findings": len(findings),
+        "findings": findings,
+    }
+
+    try:
+        with open(json_file, 'w', encoding='utf-8') as f:
+            json.dump(output, f, indent=2, ensure_ascii=False, default=str)
+        logging.info(f"JSON report created: {json_file}")
+    except Exception as e:
+        logging.error(f"Error writing JSON report: {e}")
+
+
+def main(base_url, username, token, keywords_file, regex_file, single_regex, output_file,
          filetypes, exclude_filetypes, max_size, public_only,
          space_keys, exclude_space_keys, modified_after, modified_before, created_in_year,
-         modified_in_year, no_duplicates, resume_from, scan_images_only, archive_support, 
+         modified_in_year, no_duplicates, resume_from, scan_images_only, archive_support,
          config, email_sender, email_recipient, aws_region, secret_max_length, debug_mode,
          alert, security_contact, security_wiki, mode=None, trufflehog_yaml=None,
-         trufflehog_keywords=None, trufflehog_exclude_keywords=None, _recursive=False):
+         trufflehog_keywords=None, trufflehog_exclude_keywords=None, _recursive=False,
+         export_json=False):
     """Main function to scan Confluence for keywords and secrets."""
     start_time = time.time()
     
@@ -1477,6 +1505,9 @@ def main(base_url, username, token, keywords_file, regex_file, single_regex, out
             f"{base_output}_files.csv",
             os.path.join(output_dir, "confluence_secrets.xlsx"),
             os.path.join(output_dir, "confluence_secrets_in_files.xlsx"),
+            f"{base_output}.json",
+            f"{base_output}_files.json",
+            f"{base_output}_pages.json",
         ]
         for f in files_to_clean:
             if os.path.exists(f):
@@ -1511,7 +1542,7 @@ def main(base_url, username, token, keywords_file, regex_file, single_regex, out
              alert, security_contact, security_wiki, mode=None,
              trufflehog_yaml=trufflehog_yaml, trufflehog_keywords=trufflehog_keywords,
              trufflehog_exclude_keywords=trufflehog_exclude_keywords,
-             _recursive=True)  # Recursive call
+             _recursive=True, export_json=export_json)  # Recursive call
         
         # Scan files second (without sending email)
         logging.info("\n" + "=" * 80)
@@ -1525,23 +1556,35 @@ def main(base_url, username, token, keywords_file, regex_file, single_regex, out
              alert, security_contact, security_wiki, mode="files",
              trufflehog_yaml=trufflehog_yaml, trufflehog_keywords=trufflehog_keywords,
              trufflehog_exclude_keywords=trufflehog_exclude_keywords,
-             _recursive=True)  # Recursive call
+             _recursive=True, export_json=export_json)  # Recursive call
         
+        # Derive actual output filenames from -o base name
+        output_base_both = re.sub(r'\.(csv|xlsx|json)$', '', output_file, flags=re.IGNORECASE)
+        xlsx_pages = output_base_both + "_pages.xlsx"
+        xlsx_files = output_base_both + "_files.xlsx"
+        json_pages = output_base_both + "_pages.json"
+        json_files = output_base_both + "_files.json"
+
+        # Build completion log listing all created files
+        created_files = []
+        for f in [xlsx_pages, xlsx_files]:
+            if os.path.exists(f):
+                created_files.append(os.path.basename(f))
+        if export_json:
+            for f in [json_pages, json_files]:
+                if os.path.exists(f):
+                    created_files.append(os.path.basename(f))
+        files_list = ", ".join(created_files) if created_files else "no output files found"
         logging.info("\n" + "=" * 80)
-        logging.info("BOTH MODE COMPLETED - Check confluence_secrets.xlsx and confluence_secrets_in_files.xlsx")
+        logging.info(f"BOTH MODE COMPLETED - Reports: {files_list}")
         logging.info("=" * 80)
-        
+
         # Now send ONE email with BOTH attachments if email is configured
         if email_sender and email_recipient:
             if not aws_region:
                 aws_region = "eu-central-1"
-            
+
             logging.info("Preparing to send combined email report with both attachments...")
-            
-            # Check which files exist (same directory as output_file)
-            output_dir = os.path.dirname(os.path.abspath(output_file))
-            xlsx_pages = os.path.join(output_dir, "confluence_secrets.xlsx")
-            xlsx_files = os.path.join(output_dir, "confluence_secrets_in_files.xlsx")
             
             pages_exist = os.path.exists(xlsx_pages)
             files_exist = os.path.exists(xlsx_files)
@@ -1594,8 +1637,8 @@ Total Secrets Found: {total_secrets_combined}
 - Files: {total_secrets_files}
 
 Two separate reports are attached:
-1. confluence_secrets.xlsx - Secrets found in page content
-2. confluence_secrets_in_files.xlsx - Secrets found in file attachments
+1. {os.path.basename(xlsx_pages)} - Secrets found in page content
+2. {os.path.basename(xlsx_files)} - Secrets found in file attachments
 
 Please review both reports and take appropriate action.
 """
@@ -1730,11 +1773,11 @@ Please review both reports and take appropriate action.
         spaces = get_all_spaces(base_url, auth, headers)
     
     if space_keys_set:
-        spaces = [s for s in spaces if s.get("key") in space_keys_set]
-    spaces = [s for s in spaces if s.get("key") not in exclude_space_keys_set]
+        spaces = [s for s in spaces if s.get("key", "").upper() in {k.upper() for k in space_keys_set}]
+    spaces = [s for s in spaces if s.get("key", "").upper() not in {k.upper() for k in exclude_space_keys_set}]
     spaces.sort(key=lambda s: s.get("key", ""))
     if resume_from:
-        spaces = [s for s in spaces if s.get("key") >= resume_from]
+        spaces = [s for s in spaces if s.get("key", "").upper() >= resume_from.strip().upper()]
     
     logging.info(f"Found/filtered spaces: {len(spaces)}")
 
@@ -1809,19 +1852,34 @@ Please review both reports and take appropriate action.
     
     logging.info(f"Results saved in: {output_file}")
     
-    # Create XLSX report with appropriate name (same directory as output_file)
+    # Determine base name for output files from -o flag (strip extension if provided)
+    output_base = re.sub(r'\.(csv|xlsx|json)$', '', output_file, flags=re.IGNORECASE)
+
+    # Create XLSX report (name derived from -o base)
     output_dir = os.path.dirname(os.path.abspath(output_file))
     if include_attachments:
-        xlsx_file = os.path.join(output_dir, "confluence_secrets_in_files.xlsx")
+        xlsx_file = output_base + "_files.xlsx" if mode == "files" else output_base + ".xlsx"
     else:
-        xlsx_file = os.path.join(output_dir, "confluence_secrets.xlsx")
-    
+        xlsx_file = output_base + ".xlsx"
+
     xlsx_created = False
     if create_xlsx_report(output_file, xlsx_file):
         logging.info(f"XLSX report created: {xlsx_file}")
         xlsx_created = True
     else:
         logging.warning("XLSX report creation skipped or failed")
+
+    # Create JSON report if --json flag was set
+    if export_json:
+        json_file = output_base + ("_files.json" if include_attachments and mode == "files" else ".json")
+        scan_stats = {
+            "spaces_scanned": len(spaces),
+            "pages_scanned": total_pages,
+            "files_scanned": total_files if include_attachments else 0,
+            "secrets_found": total_secrets,
+            "duration": duration_str,
+        }
+        export_findings_to_json(output_file, json_file, include_attachments, scan_stats)
     
     # Send email if configured
     if email_sender and email_recipient:
@@ -2066,7 +2124,9 @@ Examples:
     # ── 6. Output ─────────────────────────────────────────────────────────────────
     out = parser.add_argument_group("Output")
     out.add_argument("-o", "--output", default="confluence_results.csv",
-                     help="Output CSV file (XLSX auto-generated alongside it)")
+                     help="Output base name (extensions .csv / .xlsx / .json added automatically)")
+    out.add_argument("--json", action="store_true",
+                     help="Export findings to JSON in addition to XLSX")
     out.add_argument("--secret-max-length", type=int, default=None,
                      help="Max characters shown in 'Matched Value' column. Default: full value")
 
@@ -2137,5 +2197,6 @@ Examples:
         mode=getattr(args, 'mode', None),
         trufflehog_yaml=args.trufflehog_yaml,
         trufflehog_keywords=getattr(args, 'trufflehog_keywords', None),
-        trufflehog_exclude_keywords=getattr(args, 'trufflehog_exclude_keywords', None)
+        trufflehog_exclude_keywords=getattr(args, 'trufflehog_exclude_keywords', None),
+        export_json=args.json,
     )
