@@ -108,7 +108,7 @@ docker run --rm \
   --output /output/confluence_secrets.csv
 ```
 
-**3. Scan pages + attachments (JSON output):**
+**6. Scan pages + attachments (JSON output):**
 ```bash
 docker run --rm \
   -v $(pwd)/output:/output \
