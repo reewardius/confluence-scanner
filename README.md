@@ -62,7 +62,7 @@ docker run --rm \
   --username user@example.com \
   --token YOUR_API_TOKEN \
   --regex-file /app/regex.txt \
-  --output /output/results.csv
+  --output /output/confluence_secrets.csv
 ```
 
 **3. Scan pages + attachments (creates 2 separate reports):**
@@ -75,7 +75,7 @@ docker run --rm \
   --username user@example.com \
   --token YOUR_API_TOKEN \
   --regex-file /app/regex.txt \
-  --output /output/results.csv \
+  --output /output/confluence_secrets \
   -m both \
   --no-duplicates
 ```
@@ -90,7 +90,7 @@ docker run --rm \
   --username user@example.com \
   --token YOUR_API_TOKEN \
   --trufflehog-patterns \
-  --output /output/results.csv \
+  --output /output/confluence_secrets.csv \
   -m both \
   --no-duplicates
 ```
@@ -105,7 +105,23 @@ docker run --rm \
   --public-only \
   --regex-file /app/regex.txt \
   --m both \
-  --output /output/results.csv
+  --output /output/confluence_secrets.csv
+```
+
+**3. Scan pages + attachments (JSON output):**
+```bash
+docker run --rm \
+  -v $(pwd)/output:/output \
+  -v $(pwd)/regex.txt:/app/regex.txt:ro \
+  confluence-scanner \
+  --base-url https://your-org.atlassian.net \
+  --username user@example.com \
+  --token YOUR_API_TOKEN \
+  --regex-file /app/regex.txt \
+  --output /output/confluence_secrets \
+  -m both \
+  --no-duplicates \
+  --json
 ```
 
 ### Local run
@@ -116,7 +132,7 @@ python3 confluence.py \
   --username user@example.com \
   --token YOUR_API_TOKEN \
   --regex-file regex.txt \
-  --output results.csv
+  --output confluence_secrets.csv
 ```
 
 ---
