@@ -6,15 +6,15 @@ A security tool for scanning Confluence spaces for secrets, credentials, and sen
 
 ## Features
 
-- 🔍 **Scan page content** — searches the body of all Confluence pages
-- 📎 **Scan attachments** — scans files: PDF, DOCX, XLSX, JSON, TXT, images, archives
+- 🔍 **Scan page content** — searches for secrets in the text of Confluence pages
+- 📎 **Scan attachments** — scans files: PDF, DOCX, XLSX, JSON, TXT, images, etc
 - 🖼️ **OCR support** — extracts text from images using Tesseract
-- 📦 **Archive unpacking** — scans contents of ZIP and TAR archives
-- 📊 **XLSX + CSV reports** — formatted Excel report with color-coded findings
-- 📧 **Email notifications** — sends scan results via AWS SES
+- 📦 **Archive unpacking** — scans contents of archives
+- 📊 **XLSX, CSV and JSON reports** — easy-to-read report
 - 🔔 **Author alerts** — notifies page editors who exposed secrets
 - 🔓 **Public-only mode** — scan without credentials (anonymous access)
 - 🔁 **Resume support** — resume interrupted scans from a specific space
+- 📧 **Email notifications** — sends scan results via AWS SES
 - 🐳 **Docker-ready** — runs fully containerized
 
 ---
