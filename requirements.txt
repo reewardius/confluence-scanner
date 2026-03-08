@@ -1,7 +1,6 @@
 requests
 Pillow
 pytesseract
-psutil
 python-docx
 PyMuPDF
 openpyxl
