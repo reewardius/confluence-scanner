@@ -75,7 +75,7 @@ docker run --rm \
   --username user@example.com \
   --token YOUR_API_TOKEN \
   --regex-file /app/regex.txt \
-  --output /output/confluence_secrets \
+  --output /output/confluence_secrets.csv \
   -m both \
   --no-duplicates
 ```
