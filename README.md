@@ -1,4 +1,4 @@
-# Confluence Secret Scanner
+# Confluence Secrets Scanner
 
 A security tool for scanning Confluence spaces for secrets, credentials, and sensitive data using regex patterns and keywords. Supports page content scanning, file attachment scanning, OCR on images, and automated email alerts via AWS SES.
 
