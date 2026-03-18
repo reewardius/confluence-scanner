@@ -104,7 +104,7 @@ docker run --rm \
   --base-url https://your-org.atlassian.net \
   --public-only \
   --regex-file /app/regex.txt \
-  --m both \
+  -m both \
   --output /output/confluence_secrets.csv
 ```
 
